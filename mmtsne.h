@@ -80,14 +80,15 @@ private:
 		const std::vector<double> &YD);
 
 	// Compute gradient of cost function w.r.t low dimensional map points
-	void Y_gradients(double *dCdY, double *dCdD, double *Y_incs,
-		const std::vector<double> &P, const std::vector<double> &Q,
-		const std::vector<double> &YD, const double &Z, const double& momentum);
+	void Y_gradients(double *dCdY, double *dCdY_exp, double *dCdD, double *epsilon_Y,
+		const std::vector<double> &P, const std::vector<double> &Q, const std::vector<double> &YD,
+		const double &Z, const double &alpha, const double &epsilon_inc, const double &epsilon_dec);
 
 	// Compute gradient of cost function w.r.t unconstrained weights
-	void W_gradients(double *dCdW, double *dCdP, double *W,
-		const std::vector<double> &P, const std::vector<double> &Q,
-		const std::vector<double> &YD, const double &Z);
+	void W_gradients(double *dCdW, double *dCdW_exp, double *dCdP, double *W,
+		double *epsilon_W, const std::vector<double> &P, const std::vector<double> &Q,
+		const std::vector<double> &YD, const double &Z, const double &alpha,
+		const double &epsilon_inc, const double &epsilon_dec);
 	
 	// Compute importance weights expressed in terms of unconstrained weights
 	void update_imp_W(const std::vector<double> &W);
