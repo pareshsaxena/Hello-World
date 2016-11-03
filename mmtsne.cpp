@@ -27,7 +27,7 @@
 
 #include <cmath>
 #include <exception>
-#include <float.h>
+//#include <float.h>
 #include <stdlib.h>
 #include <iostream>
 #include <iomanip>
@@ -97,32 +97,43 @@ void MMTSNE::construct_maps(int y_dims, int y_maps, int iterations,
 	}
 	
 	// MM t-SNE data structures		
-	std::vector<double> YD(x_rows * x_rows * y_maps, 0);			// Output pairwise distance matrix
-	std::vector<double> Q(x_rows * x_rows, 0);						// Output pairwise similarity matrix			
-	std::vector<double> Y_incs(x_rows * y_dims * y_maps, 0);		// Y increments matrix
-	std::vector<double> W(x_rows * y_maps, 1.0 / y_maps);			// Weights matrix initialized with (1/ y_maps)
-																	
-	iW.resize(x_rows * y_maps);										// Resize importance weights matrix to size of W	
-		
-	std::vector<double> dCdY(x_rows * y_dims * y_maps, 0);			// Derivative of cost function w.r.t Y
-	std::vector<double> dCdD(x_rows * x_rows * y_maps, 0);			// Derivative of cost function w.r.t Y distances
-	std::vector<double> dCdW(x_rows * y_maps, 0);					// Derivative of cost function w.r.t W
-	std::vector<double> dCdP(x_rows * y_maps, 0);					// Derivative of cost function w.r.t importance weights
+	std::vector<double> YD(x_rows * x_rows * y_maps, 0);				// Output pairwise distance matrix
+	std::vector<double> Q(x_rows * x_rows, 0);							// Output pairwise similarity matrix			
 	
+	std::vector<double> W(x_rows * y_maps, 1.0 / y_maps);				// Weights matrix initialized with (1/ y_maps)
+																	
+	iW.resize(x_rows * y_maps);											// Resize importance weights matrix to size of W	
+	
+	// Gradient descent data structures
+	std::vector<double> dCdY(x_rows * y_dims * y_maps, 0);				// Derivative of cost function w.r.t Y
+	std::vector<double> dCdD(x_rows * x_rows * y_maps, 0);				// Derivative of cost function w.r.t Y distances
+	std::vector<double> dCdW(x_rows * y_maps, 0);						// Derivative of cost function w.r.t W
+	std::vector<double> dCdP(x_rows * y_maps, 0);						// Derivative of cost function w.r.t importance weights
+
+	std::vector<double> dCdY_exp(x_rows * y_dims * y_maps, 0);			// Exponential smoothing of the derivative of cost function w.r.t Y
+	std::vector<double> dCdW_exp(x_rows * y_maps, 0);					// Exponential smoothing of the derivative of cost function w.r.t W
+
+	std::vector<double> epsilon_Y(x_rows * y_dims * y_maps, 1);			// Learning rates for Y
+	std::vector<double> epsilon_W(x_rows * y_maps, 1);					// Learning rates for W
+		
 	// Gradient descent parameters
 	int max_iter = iterations;
-	int stop_lying_iter = 25;
-	int mom_switch_iter = 10;
-	// Learning parameters
-	double momentum = 0.5, final_momentum = 0.8;		
+	int stop_lying_iter = 25;	
 	
+	double alpha = 0.5;													// Exponential smoothing parameter
+	double epsilon_inc = 1; 											// Epsilon increment parameter (linear)
+	double epsilon_dec = 0.8;											// Epsilon decrement parameter (exponential); should be in the range (0.3, 0.8]
+		
+	double alpha_update = (1 - alpha) / max_iter;						
+	double epsilon_dec_update = (epsilon_dec - 0.3) / max_iter;
+		
 	// Lie about high-dimensional probabilities (P *= 4.0)	
 	for (size_t i = 0; i < P.size(); ++i) {
 		P[i] *= 4.0;
 	}
 
 	std::default_random_engine generator(time(NULL));
-	std::normal_distribution<double> norm_dist(0.0, 1.0);			// Normal distribution with mean 0 & sigma 1.0
+	std::normal_distribution<double> norm_dist(0.0, 1.0);				// Normal distribution with mean 0 & sigma 1.0
 
 	// Initialize Y matrix with a random solution (values)
 	Y.resize(x_rows * y_dims * y_maps);
@@ -134,15 +145,24 @@ void MMTSNE::construct_maps(int y_dims, int y_maps, int iterations,
 		std::cout << "Running gradient descent loop..." << std::endl;
 		start = clock();
 	}
+
 	// Gradient descent loop
 	for (size_t iter = 0; iter < max_iter; ++iter) {
-		double Z = 0;
+		// Z = \sum_{k} \sum_{l \neq k} \sum_{m'} \pi_{l}^{m'} \pi_{k}^{m'} (1 + d_{kl}^{m'})^{-1}
+		double Z = 0;												
+		
+		// Update alpha
+		alpha += alpha_update;
+
+		// Update epsilon decrement parameter
+		epsilon_dec -= epsilon_dec_update;
+
 		// Update importance weights
 		update_imp_W(W);
 
 		// Compute output pairwise distance matrix YD
 		/* LaTex equation
-		YD_{rc} = YD_{cr} = (1 + ||y_{r} - y_{c}||)^{-1} 
+		YD_{ij} = YD_{ji} = (1 + ||y_{i} - y_{j}||)^{-1} 
 		*/
 		size_t x_rows2 = x_rows * x_rows;
 		for (size_t m = 0; m < y_maps; ++m) {			
@@ -166,34 +186,30 @@ void MMTSNE::construct_maps(int y_dims, int y_maps, int iterations,
 
 		// Compute error as Kullback-Liebler divergence between P & Q		
 		if (verbose && iter % 1 == 0) {				
-			/*long double sum_W = 0;
+			long double sum_W = 0;
 			for (size_t i = 0; i < W.size(); ++i) sum_W += W[i];
-			std::cout << "\t Sum of Weights: " << sum_W << std::endl;*/
+			std::cout << "\t Sum of Weights: " << sum_W << std::endl;
 			double error = 0;
 			error = compute_KL(P, Q);
 			std::cout << "\t GD iteration: " << std::setw(4) << iter <<
 				" | KL divergence (error): " << std::setprecision(15) << error << std::endl;
 		}
 		
-		dCdD.assign(x_rows * x_rows * y_maps, 0);				// Reset dCdY[m] matrix elements to 0
+		dCdD.assign(x_rows * x_rows * y_maps, 0);				// Reset dCdY matrix elements to 0
 		dCdY.assign(x_rows * y_dims * y_maps, 0);				// Reset dCdY matrix elements to 0
 		// Compute Y gradients and update Y		
-		std::thread Y_thread(&MMTSNE::Y_gradients, this, dCdY.data(), dCdD.data(),
-			Y_incs.data(), P, Q, YD, Z, momentum);
-		
+		std::thread Y_thread(&MMTSNE::Y_gradients, this, dCdY.data(), dCdY_exp.data(), 
+			dCdD.data(), epsilon_Y.data(), P, Q, YD, Z, alpha, epsilon_inc, epsilon_dec);		
 		
 		dCdP.assign(x_rows * y_maps, 0);						// Reset dCdP matrix elements to 0
 		dCdW.assign(x_rows * y_maps, 0);						// Reset dCdW matrix elements to 0
 		// Compute W gradients and update W
-		std::thread W_thread(&MMTSNE::W_gradients, this, dCdW.data(), dCdP.data(), 
-			W.data(), P, Q, YD, Z);		
+		std::thread W_thread(&MMTSNE::W_gradients, this, dCdW.data(), dCdW_exp.data(),
+			dCdP.data(), W.data(), epsilon_W.data(), P, Q, YD, Z, alpha, epsilon_inc, epsilon_dec);		
 		
 		// Synchronize threads
 		if (Y_thread.joinable()) Y_thread.join();
-		if (W_thread.joinable()) W_thread.join();		
-
-		// Update momentum 
-		if (iter == mom_switch_iter) momentum = final_momentum;
+		if (W_thread.joinable()) W_thread.join();				
 
 		// It's about time we stopped lying about probabilites, dear... (P /= 4.0)		
 		if (iter == stop_lying_iter) {
@@ -230,12 +246,13 @@ void MMTSNE::compute_similarity_Q(std::vector<double> &Q, double &Z,
 			size_t base2_iw = rj * y_maps;
 			for (size_t m = 0; m < y_maps; ++m) {
 				double qt = (iW[base1_iw + m] * iW[base2_iw + m] 
-					* YD[m*x_rows*x_rows + base1_q + rj]);
-				// DEBUG CODE
-				if (isnan(qt)) {
-					qt = DBL_MIN;
+					* YD[m*x_rows*x_rows + base1_q + rj]);				
+				if (!isnan(qt)) {
+					Q[base1_q + rj] += qt;
 				}
-				Q[base1_q + rj] += qt;
+				else {
+					std::cout << "";		// DEBUG CODE
+				}
 			}			
 			Q[base2_q + ri] = Q[base1_q + rj];			
 			Z += Q[base1_q + rj];
@@ -243,21 +260,21 @@ void MMTSNE::compute_similarity_Q(std::vector<double> &Q, double &Z,
 	}
 	Z *= 2.0;
 	
-	// Divide all elements in Q by Z		
-	for (size_t ri = 0; ri < x_rows; ++ri) {
-		for (size_t rj = 0; rj < ri; ++rj) {
-			double qq = Q[ri*x_rows + rj] / Z;
-			// DEBUG CODE
-			if (isnan(qq) || qq < DBL_MIN) {
-				Q[ri*x_rows + rj] = Q[rj*x_rows + ri] = DBL_MIN;
-			}
-			else {
-				Q[ri*x_rows + rj] /= Z;
-				Q[rj*x_rows + ri] = Q[ri*x_rows + rj];
-			}
-		}		
-	}	
-	
+// Divide all elements in Q by Z		
+for (size_t ri = 0; ri < x_rows; ++ri) {
+	for (size_t rj = 0; rj < ri; ++rj) {
+		double qq = Q[ri*x_rows + rj] / Z;
+		// DEBUG CODE
+		if (isnan(qq)) {
+			Q[ri*x_rows + rj] = Q[rj*x_rows + ri] = DBL_MIN;
+		}
+		else {
+			Q[ri*x_rows + rj] /= Z;
+			Q[rj*x_rows + ri] = Q[ri*x_rows + rj];
+		}
+	}
+}
+
 }
 
 
@@ -270,10 +287,9 @@ double MMTSNE::compute_KL(const std::vector<double> &P, const std::vector<double
 
 	for (size_t ri = 0; ri < x_rows; ++ri) {
 		size_t base1 = ri * x_rows;
-		for (size_t rj = 0; rj < ri; ++rj) {			
-			kl_divergence += ((P[base1 + rj] < DBL_MIN ? DBL_MIN : P[base1 + rj]) *
-				(log(P[base1 + rj] < DBL_MIN ? DBL_MIN : P[base1 + rj]) -
-					log(Q[base1 + rj] < DBL_MIN ? DBL_MIN : Q[base1 + rj])));
+		for (size_t rj = 0; rj < ri; ++rj) {
+			kl_divergence += (P[base1 + rj] *
+				(log((P[base1 + rj] + DBL_MIN) / (Q[base1 + rj] + DBL_MIN))));
 
 			// DEBUG CODE
 			if (isnan(kl_divergence) || isinf(kl_divergence)) {
@@ -281,19 +297,17 @@ double MMTSNE::compute_KL(const std::vector<double> &P, const std::vector<double
 			}
 		}
 	}
-	
+
 	return kl_divergence;
 }
 
 // Compute Y gradients and update Y
-void MMTSNE::Y_gradients(double *dCdY, double *dCdD, double *Y_incs, 
-	const std::vector<double> &P, const std::vector<double> &Q, 
-	const std::vector<double> &YD, const double &Z, const double& momentum) {
-	double epsilonY = 5;							// Learning rate for Y (arbitrary)	
-	
+void MMTSNE::Y_gradients(double *dCdY, double *dCdY_exp, double *dCdD, double *epsilon_Y, 
+	const std::vector<double> &P, const std::vector<double> &Q, const std::vector<double> &YD, 
+	const double &Z, const double &alpha, const double &epsilon_inc, const double &epsilon_dec) {
 	// Compute dCdD
 	/* LaTex equation
-	\frac{\delta C(Y)}{\delta d_{rc}^{(m)}} = \frac{\pi_{r}^{(m)} \pi_{c}^{(m)} 
+	\frac{\delta C(Y)}{\delta d_{rc}^{(m)}} = \frac{\pi_{r}^{(m)} \pi_{c}^{(m)}
 	(1+d_{rc}^{(m)})^{-1}} {q_{rc}Z}(p_{rc}-q_{rc})(1+d_{rc}^{(m)})^{-1}
 	*/
 	for (size_t m = 0; m < y_maps; ++m) {
@@ -301,13 +315,12 @@ void MMTSNE::Y_gradients(double *dCdY, double *dCdD, double *Y_incs,
 		for (size_t ri = 0; ri < x_rows; ++ri) {
 			size_t base2 = ri * x_rows;
 			size_t base2_iw = ri * y_maps;
-			dCdD[base1 + base2 + ri] = iW[m*x_rows + ri] * iW[m*x_rows + ri];			
+			dCdD[base1 + base2 + ri] = iW[m*x_rows + ri] * iW[m*x_rows + ri];
 			for (size_t rj = 0; rj < ri; ++rj) {
-				double qz = (Q[base2 + rj] * Z) < DBL_MIN ? DBL_MIN : (Q[base2 + rj] * Z);
-				dCdD[base1 + rj*x_rows + ri] = dCdD[base1 + base2 + rj] = 
-					 (iW[base2_iw + m] * iW[rj*y_maps + m] * (P[base2 + rj] - Q[base2 + rj]) *
-					 pow(YD[base1 + base2 + rj], 2)) / (qz);
-				
+				dCdD[base1 + rj*x_rows + ri] = dCdD[base1 + base2 + rj] =
+					(iW[base2_iw + m] * iW[rj*y_maps + m] * (P[base2 + rj] - Q[base2 + rj]) *
+						pow(YD[base1 + base2 + rj], 2)) / ((Q[base2 + rj] * Z) + DBL_MIN);
+
 				// DEBUG CODE
 				if (isnan(dCdD[base1 + rj*x_rows + ri]) || isinf(dCdD[base1 + rj*x_rows + ri])) {
 					std::cout << "";
@@ -318,9 +331,9 @@ void MMTSNE::Y_gradients(double *dCdY, double *dCdD, double *Y_incs,
 
 	// Compute dCdY
 	/* LaTex equation
-	\frac{\delta C(Y)}{\delta y_{r}^{(m)}} = 4\sum_{c} 
+	\frac{\delta C(Y)}{\delta y_{r}^{(m)}} = 4\sum_{c}
 	\frac{\delta C(Y)}{\delta d_{rc}^{(m)}}(y_{r}^{(m)}-y_{c}^{(m)})
-	*/	
+	*/
 	for (size_t m = 0; m < y_maps; ++m) {
 		size_t base1_y = m * x_rows * y_dims;
 		size_t base1_d = m * x_rows * x_rows;
@@ -329,15 +342,12 @@ void MMTSNE::Y_gradients(double *dCdY, double *dCdD, double *Y_incs,
 			size_t base2_d = ri * x_rows;
 			for (size_t rj = 0; rj < x_rows; ++rj) {
 				for (size_t d = 0; d < y_dims; ++d) {
-					dCdY[base1_y + base2_y + d] += dCdD[base1_d + base2_d + rj] * 
+					dCdY[base1_y + base2_y + d] += dCdD[base1_d + base2_d + rj] *
 						(Y[base1_y + base2_y + d] - Y[base1_y + rj*y_dims + d]);
-				}				
-			}			
+				}
+			}
 		}
-	}
-	/*for (size_t i = 0; i < dCdY.size(); ++i) {
-		dCdY[i] *= 4.0;
-	}*/
+	}	
 
 	// Update Y
 	for (size_t m = 0; m < y_maps; ++m) {
@@ -345,12 +355,28 @@ void MMTSNE::Y_gradients(double *dCdY, double *dCdD, double *Y_incs,
 		for (size_t ri = 0; ri < x_rows; ++ri) {
 			size_t base2 = ri * y_dims;
 			for (size_t d = 0; d < y_dims; ++d) {
-				Y_incs[base1 + base2 + d] = momentum * Y_incs[base1 + base2 + d] -
-					epsilonY * dCdY[base1 + base2 + d];
-				Y[base1 + base2 + d] += Y_incs[base1 + base2 + d];
+				double delta = dCdY[base1 + base2 + d] * dCdY_exp[base1 + base2 + d];
+				if (delta > 0) {
+					// Increment epsilon linearly
+					epsilon_Y[base1 + base2 + d] += epsilon_inc;
+				}
+				else {
+					// Decrement epsilon exponentially
+					epsilon_Y[base1 + base2 + d] *= epsilon_dec;
+				}
+
+				// Exponential smoothing of dCdY using alpha
+				dCdY_exp[base1 + base2 + d] = (alpha * 4 * dCdY[base1 + base2 + d]) +		
+					((1 - alpha) * dCdY_exp[base1 + base2 + d]);							// Multiply dCdY by 4 as per gradient equation
+
+				// Update Y
+				Y[base1 + base2 + d] -= (epsilon_Y[base1 + base2 + d] *
+					dCdY_exp[base1 + base2 + d]);
 			}
 		}
 	}
+
+	// Make Y zero mean along all dimensions
 	double mean = 0;
 	for (size_t m = 0; m < y_maps; ++m) {
 		size_t base1 = m * x_rows * y_dims;
@@ -368,10 +394,11 @@ void MMTSNE::Y_gradients(double *dCdY, double *dCdD, double *Y_incs,
 }
 
 // Compute W gradients and update W
-void MMTSNE::W_gradients(double *dCdW, double *dCdP, double *W,
-	const std::vector<double> &P, const std::vector<double> &Q, 
-	const std::vector<double> &YD, const double &Z) {
-	double epsilonW = 2;							// Learning rate for W (arbitrary)
+void MMTSNE::W_gradients(double *dCdW, double *dCdW_exp, double *dCdP, double *W,
+	double *epsilon_W, const std::vector<double> &P, const std::vector<double> &Q,
+	const std::vector<double> &YD, const double &Z, const double &alpha,
+	const double &epsilon_inc, const double &epsilon_dec) {
+	
 	// Compute dCdP
 	/* LaTex equation
 	\frac{\delta C(Y)}{\delta \pi_{i}^{(m)}} = \sum_{j}(\frac{2}{q_{ij}Z} 
@@ -382,10 +409,9 @@ void MMTSNE::W_gradients(double *dCdW, double *dCdP, double *W,
 		for (size_t ri = 0; ri < x_rows; ++ri) {
 			size_t base1_p = ri * y_maps;
 			size_t base1_s = ri * x_rows;
-			for (size_t rj = 0; rj < x_rows; ++rj) {
-				double qz = (Q[base1_s + rj] * Z) < DBL_MIN ? DBL_MIN : (Q[base1_s + rj] * Z);
+			for (size_t rj = 0; rj < x_rows; ++rj) {				
 				double dP = ((2 * (P[base1_s + rj] - Q[base1_s + rj]) *
-					iW[base1_p + m] * YD[m*x_rows*x_rows + base1_s + rj]) / qz);
+					iW[base1_p + m] * YD[m*x_rows*x_rows + base1_s + rj]) / ((Q[base1_s + rj] * Z) + DBL_MIN));
 				
 				// DEBUG CODE 
 				if (isnan(dP) || isinf(dP)) {
@@ -419,10 +445,19 @@ void MMTSNE::W_gradients(double *dCdW, double *dCdP, double *W,
 	for (size_t ri = 0; ri < x_rows; ++ri) {
 		size_t base1 = ri * y_maps;
 		for (size_t m = 0; m < y_maps; ++m) {
-			if ((W[base1 + m] - (epsilonW * dCdW[base1 + m]))> 1) {
-				W[base1 + m] = (W[base1 + m] - 1) * 0.5;		// Keep weights less than 1
+			double delta = dCdW[base1 + m] * dCdW_exp[base1 + m];
+			if (delta > 0) {
+				epsilon_W[base1 + m] += epsilon_inc;
 			}
-			else W[base1 + m] -= (epsilonW * dCdW[base1 + m]);
+			else {
+				epsilon_W[base1 + m] *= epsilon_dec;
+			}
+
+			// Exponential smoothing of dCdW
+			dCdW_exp[base1 + m] = (alpha * dCdW[base1 + m]) +
+				((1 - alpha) * dCdW_exp[base1 + m]);
+
+			W[base1 + m] -= (epsilon_W[base1 + m] * dCdW[base1 + m]);
 
 			// DEBUG CODE
 			if (isnan(W[base1 + m])) {
