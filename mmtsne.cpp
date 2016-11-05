@@ -24,30 +24,23 @@
 *
 */
 
-
 #include <cmath>
 #include <exception>
-//#include <float.h>
-#include <stdlib.h>
-#include <iostream>
-#include <iomanip>
 #include <fstream>
-#include <thread>
-#include <vector>
+#include <iomanip>
+#include <iostream>
+#include <numeric>
 #include <random>
+#include <sstream>
+#include <thread>
 #include <time.h>
+#include <vector>
 
 #include "mmtsne.h"
 
 
 // Default constructor
 MMTSNE::MMTSNE() : perplexity(30) {	
-}
-
-
-MMTSNE::MMTSNE(double new_perplexity) :
-	perplexity(new_perplexity) {
-
 }
 
 // Destructor
@@ -60,12 +53,11 @@ void MMTSNE::construct_maps() {
 
 // Perform Multiple Maps t-SNE (verbose setting)
 void MMTSNE::construct_maps(bool verbose) {
-	construct_maps(2, 30, 1000, verbose);
+	construct_maps(2, 5, 500, verbose);
 }
 
 // Perform Multiple Maps t-SNE (detailed settings)
-void MMTSNE::construct_maps(int y_dims, int y_maps, int iterations, 
-	bool verbose) {
+void MMTSNE::construct_maps(size_t y_dims, size_t y_maps, size_t max_iter, bool verbose) {
 	this->verbose = verbose;
 	this->y_maps = y_maps;
 	this->y_dims = y_dims;
@@ -77,12 +69,14 @@ void MMTSNE::construct_maps(int y_dims, int y_maps, int iterations,
 	switch (status) {
 	case empty:
 		std::cout << "No input vectors or probabilities loaded" << std::endl;
-		return;	
+		return;
+	case input_probability:
+		break;
 	case input_vectors:
 		std::cout << "Normalizing input vectors..." << std::endl;
 		start = clock();
 		// Normalize high-dimensional input vectors
-		normalize(X);
+		normalize(X, x_rows, x_dims);
 		end = clock();
 		std::cout << "\t Done. Time taken: " << std::setprecision(3) <<
 			(double)(end - start) / CLOCKS_PER_SEC << " seconds" << std::endl;
@@ -91,12 +85,11 @@ void MMTSNE::construct_maps(int y_dims, int y_maps, int iterations,
 		compute_SNE(P);
 		end = clock();
 		std::cout << "\t Done. Time taken: " << std::setprecision(3) <<
-			(end - start) / CLOCKS_PER_SEC << " seconds" << std::endl;		
-	case input_probability:		
-		break;
+			(end - start) / CLOCKS_PER_SEC << " seconds" << std::endl;
+		break;	
 	}
 	
-	// MM t-SNE data structures		
+	// MM t-SNE data structures
 	std::vector<double> YD(x_rows * x_rows * y_maps, 0);				// Output pairwise distance matrix
 	std::vector<double> Q(x_rows * x_rows, 0);							// Output pairwise similarity matrix			
 	
@@ -116,16 +109,20 @@ void MMTSNE::construct_maps(int y_dims, int y_maps, int iterations,
 	std::vector<double> epsilon_Y(x_rows * y_dims * y_maps, 1);			// Learning rates for Y
 	std::vector<double> epsilon_W(x_rows * y_maps, 1);					// Learning rates for W
 		
-	// Gradient descent parameters
-	int max_iter = iterations;
-	int stop_lying_iter = 25;	
+	// Gradient descent parameters	
+	int stop_lying_iter = (max_iter*0.05 > 30) ? 30 : (int)(max_iter*0.05);	
 	
-	double alpha = 0.5;													// Exponential smoothing parameter
-	double epsilon_inc = 1; 											// Epsilon increment parameter (linear)
-	double epsilon_dec = 0.8;											// Epsilon decrement parameter (exponential); should be in the range (0.3, 0.8]
+	double alpha = 0.65;												// Exponential smoothing parameter
+	double epsilon_inc = 10; 											// Epsilon increment parameter (linear)
+	double epsilon_dec = 0.55;											// Epsilon decrement parameter (exponential); should be in the range (0.1, 0.7]
 		
 	double alpha_update = (1 - alpha) / max_iter;						
-	double epsilon_dec_update = (epsilon_dec - 0.3) / max_iter;
+	double epsilon_dec_update = (epsilon_dec - 0.1) / max_iter;
+
+	double error = 0;
+	double error_best = DBL_MAX;
+
+	error_list.clear();
 		
 	// Lie about high-dimensional probabilities (P *= 4.0)	
 	for (size_t i = 0; i < P.size(); ++i) {
@@ -138,7 +135,7 @@ void MMTSNE::construct_maps(int y_dims, int y_maps, int iterations,
 	// Initialize Y matrix with a random solution (values)
 	Y.resize(x_rows * y_dims * y_maps);
 	for (size_t i = 0; i < Y.size(); ++i) {
-		Y[i] = norm_dist(generator) * 0.001;
+		Y[i] = norm_dist(generator);
 	}
 	
 	if (verbose) {
@@ -179,30 +176,33 @@ void MMTSNE::construct_maps(int y_dims, int y_maps, int iterations,
 					YD[base1_yd + rj] = YD[base2_yd + ri] = (1.0 / (1.0 + dist));
 				}
 			}
-		}			
+		}
 						
 		// Compute output pairwise similarity matrix Q
 		compute_similarity_Q(Q, Z, YD);		
 
-		// Compute error as Kullback-Liebler divergence between P & Q		
-		if (verbose && iter % 1 == 0) {				
-			long double sum_W = 0;
-			for (size_t i = 0; i < W.size(); ++i) sum_W += W[i];
-			std::cout << "\t Sum of Weights: " << sum_W << std::endl;
-			double error = 0;
-			error = compute_KL(P, Q);
+		// Compute error as Kullback-Liebler divergence between P & Q
+		error = compute_KL(P, Q);
+		error_list.push_back(error);
+		if (error < error_best) {
+			error_best = error;
+			// Save the best solution
+			Y_best = Y;
+			iW_best = iW;
+		}
+		if (verbose) {			
 			std::cout << "\t GD iteration: " << std::setw(4) << iter <<
-				" | KL divergence (error): " << std::setprecision(15) << error << std::endl;
+				" | KL divergence (error): " << std::setprecision(15) << error << std::endl;			
 		}
 		
-		dCdD.assign(x_rows * x_rows * y_maps, 0);				// Reset dCdY matrix elements to 0
-		dCdY.assign(x_rows * y_dims * y_maps, 0);				// Reset dCdY matrix elements to 0
+		dCdD.assign(x_rows * x_rows * y_maps, 0);						// Reset dCdY matrix elements to 0
+		dCdY.assign(x_rows * y_dims * y_maps, 0);						// Reset dCdY matrix elements to 0
 		// Compute Y gradients and update Y		
 		std::thread Y_thread(&MMTSNE::Y_gradients, this, dCdY.data(), dCdY_exp.data(), 
 			dCdD.data(), epsilon_Y.data(), P, Q, YD, Z, alpha, epsilon_inc, epsilon_dec);		
 		
-		dCdP.assign(x_rows * y_maps, 0);						// Reset dCdP matrix elements to 0
-		dCdW.assign(x_rows * y_maps, 0);						// Reset dCdW matrix elements to 0
+		dCdP.assign(x_rows * y_maps, 0);								// Reset dCdP matrix elements to 0
+		dCdW.assign(x_rows * y_maps, 0);								// Reset dCdW matrix elements to 0
 		// Compute W gradients and update W
 		std::thread W_thread(&MMTSNE::W_gradients, this, dCdW.data(), dCdW_exp.data(),
 			dCdP.data(), W.data(), epsilon_W.data(), P, Q, YD, Z, alpha, epsilon_inc, epsilon_dec);		
@@ -222,7 +222,9 @@ void MMTSNE::construct_maps(int y_dims, int y_maps, int iterations,
 	if (verbose) {
 		end = clock();
 		std::cout << "\t Done. Time taken: " << std::setprecision(3) <<
-			(end - start) / CLOCKS_PER_SEC << " seconds" << std::endl;
+			(end - start) / (CLOCKS_PER_SEC * 60) << " minutes\n" << std::endl;
+		std::cout << "Best solution: KL divergence of " << std::setprecision(15) <<
+			error_best << std::endl;		
 	}
 }
 
@@ -245,14 +247,14 @@ void MMTSNE::compute_similarity_Q(std::vector<double> &Q, double &Z,
 			size_t base2_q = rj * x_rows;
 			size_t base2_iw = rj * y_maps;
 			for (size_t m = 0; m < y_maps; ++m) {
-				double qt = (iW[base1_iw + m] * iW[base2_iw + m] 
+				Q[base1_q + rj] += (iW[base1_iw + m] * iW[base2_iw + m]
 					* YD[m*x_rows*x_rows + base1_q + rj]);				
-				if (!isnan(qt)) {
-					Q[base1_q + rj] += qt;
-				}
-				else {
-					std::cout << "";		// DEBUG CODE
-				}
+				//if (!isnan(qt)) {
+				//	Q[base1_q + rj] += qt;
+				//}
+				//else {
+				//	std::cout << "";		// DEBUG CODE
+				//}
 			}			
 			Q[base2_q + ri] = Q[base1_q + rj];			
 			Z += Q[base1_q + rj];
@@ -260,27 +262,29 @@ void MMTSNE::compute_similarity_Q(std::vector<double> &Q, double &Z,
 	}
 	Z *= 2.0;
 	
-// Divide all elements in Q by Z		
-for (size_t ri = 0; ri < x_rows; ++ri) {
-	for (size_t rj = 0; rj < ri; ++rj) {
-		double qq = Q[ri*x_rows + rj] / Z;
-		// DEBUG CODE
-		if (isnan(qq)) {
-			Q[ri*x_rows + rj] = Q[rj*x_rows + ri] = DBL_MIN;
-		}
-		else {
+	// Divide all elements in Q by Z		
+	for (size_t ri = 0; ri < x_rows; ++ri) {
+		for (size_t rj = 0; rj < ri; ++rj) {
 			Q[ri*x_rows + rj] /= Z;
 			Q[rj*x_rows + ri] = Q[ri*x_rows + rj];
+			//double qq = Q[ri*x_rows + rj] / Z;
+			//// DEBUG CODE
+			//if (isnan(qq)) {
+			//	Q[ri*x_rows + rj] = Q[rj*x_rows + ri] = DBL_MIN;
+			//}
+			//else {
+			//	Q[ri*x_rows + rj] /= Z;
+			//	Q[rj*x_rows + ri] = Q[ri*x_rows + rj];
+			//}
 		}
 	}
-}
 
 }
 
 
 // Evaluate cost function as Kullback-Liebler divergence between P & Q
 /* LaTex equation
-C(Y) = KL(P||Q) = \sum_{r}\sum_{c\neq r} p_{rc} \: log \frac {p_{rc}}{q_{rc}}
+C(Y) = KL(P||Q) = \sum_{i}\sum_{j\neq i} p_{ij} \: log \frac {p_{ij}}{q_{ij}}
 */
 double MMTSNE::compute_KL(const std::vector<double> &P, const std::vector<double> &Q) {
 	double kl_divergence = 0;
@@ -290,11 +294,6 @@ double MMTSNE::compute_KL(const std::vector<double> &P, const std::vector<double
 		for (size_t rj = 0; rj < ri; ++rj) {
 			kl_divergence += (P[base1 + rj] *
 				(log((P[base1 + rj] + DBL_MIN) / (Q[base1 + rj] + DBL_MIN))));
-
-			// DEBUG CODE
-			if (isnan(kl_divergence) || isinf(kl_divergence)) {
-				std::cout << "";
-			}
 		}
 	}
 
@@ -321,10 +320,6 @@ void MMTSNE::Y_gradients(double *dCdY, double *dCdY_exp, double *dCdD, double *e
 					(iW[base2_iw + m] * iW[rj*y_maps + m] * (P[base2 + rj] - Q[base2 + rj]) *
 						pow(YD[base1 + base2 + rj], 2)) / ((Q[base2 + rj] * Z) + DBL_MIN);
 
-				// DEBUG CODE
-				if (isnan(dCdD[base1 + rj*x_rows + ri]) || isinf(dCdD[base1 + rj*x_rows + ri])) {
-					std::cout << "";
-				}
 			}
 		}
 	}
@@ -365,9 +360,9 @@ void MMTSNE::Y_gradients(double *dCdY, double *dCdY_exp, double *dCdD, double *e
 					epsilon_Y[base1 + base2 + d] *= epsilon_dec;
 				}
 
-				// Exponential smoothing of dCdY using alpha
+				// Exponential smoothing of dCdY using alpha (multiply dCdY by 4 as per gradient equation)
 				dCdY_exp[base1 + base2 + d] = (alpha * 4 * dCdY[base1 + base2 + d]) +		
-					((1 - alpha) * dCdY_exp[base1 + base2 + d]);							// Multiply dCdY by 4 as per gradient equation
+					((1 - alpha) * dCdY_exp[base1 + base2 + d]); 
 
 				// Update Y
 				Y[base1 + base2 + d] -= (epsilon_Y[base1 + base2 + d] *
@@ -410,14 +405,9 @@ void MMTSNE::W_gradients(double *dCdW, double *dCdW_exp, double *dCdP, double *W
 			size_t base1_p = ri * y_maps;
 			size_t base1_s = ri * x_rows;
 			for (size_t rj = 0; rj < x_rows; ++rj) {				
-				double dP = ((2 * (P[base1_s + rj] - Q[base1_s + rj]) *
-					iW[base1_p + m] * YD[m*x_rows*x_rows + base1_s + rj]) / ((Q[base1_s + rj] * Z) + DBL_MIN));
-				
-				// DEBUG CODE 
-				if (isnan(dP) || isinf(dP)) {
-					std::cout << "";
-				}
-				else dCdP[base1_p + m] += dP;
+				dCdP[base1_p + m] += ((2 * (P[base1_s + rj] - Q[base1_s + rj]) *
+					iW[base1_p + m] * YD[m*x_rows*x_rows + base1_s + rj]) / 
+					((Q[base1_s + rj] * Z) + DBL_MIN));				
 			}
 		}
 	}
@@ -433,17 +423,14 @@ void MMTSNE::W_gradients(double *dCdW, double *dCdW_exp, double *dCdP, double *W
 			for (size_t mk = 0; mk < y_maps; ++mk) {
 				dCdW[base1 + mk] += (iW[base1 + mk] * dCdP[base1 + mk]);
 			}
-			dCdW[base1 + m] = iW[base1 + m] * (dCdW[base1 + m] - dCdP[base1 + m]);
-			// DEBUG CODE
-			if (isnan(dCdW[base1 + m])) {
-				std::cout << "";
-			}
+			dCdW[base1 + m] = iW[base1 + m] * (dCdW[base1 + m] - dCdP[base1 + m]);			
 		}
 	}
-
+	bool reset = false;
 	// Update W		
 	for (size_t ri = 0; ri < x_rows; ++ri) {
 		size_t base1 = ri * y_maps;
+		double max_w = DBL_MIN;
 		for (size_t m = 0; m < y_maps; ++m) {
 			double delta = dCdW[base1 + m] * dCdW_exp[base1 + m];
 			if (delta > 0) {
@@ -458,28 +445,30 @@ void MMTSNE::W_gradients(double *dCdW, double *dCdW_exp, double *dCdP, double *W
 				((1 - alpha) * dCdW_exp[base1 + m]);
 
 			W[base1 + m] -= (epsilon_W[base1 + m] * dCdW[base1 + m]);
+			if (W[base1 + m] > max_w) max_w = W[base1 + m];
 
-			// DEBUG CODE
-			if (isnan(W[base1 + m])) {
-				std::cout << "";
+		}
+
+		// Keep weights negative
+		for (size_t m = 0; m < y_maps; ++m) {
+			W[base1 + m] -= max_w;
+			if (W[base1 + m] < -1e20) {
+				reset = true;
+				break;
 			}
-		}
+		}		
 	}
-}
+	if (reset) {
+		for (size_t r = 0; r < x_rows; ++r) {
+			double max_w = DBL_MIN;
+			for (size_t c = 0; c < y_maps; ++c)
+				if (dCdW_exp[r*y_maps + c] > max_w) max_w = dCdW_exp[r*y_maps + c];
+			for (size_t c = 0; c < y_maps; ++c)
+				W[r*y_maps + c] = dCdW_exp[r*y_maps + c] - max_w;
+		}		
+	}
+	
 
-// Symmetrize (square) matrix
-void MMTSNE::symmetrize(std::vector<double> &M) {	
-	double sum_M = 0;
-	for (auto &mi : M) {
-		sum_M += mi;
-	}
-	sum_M *= 2;
-
-	for (size_t ri = 0; ri < x_rows; ++ri) {
-		for (size_t rj = 0; rj < x_rows; ++rj) {
-			M[ri*x_rows + rj] = M[rj*x_rows + ri] = (M[ri*x_rows + rj] + M[rj*x_rows + ri]) / sum_M;
-		}
-	}
 }
 
 // Update importance weights
@@ -488,27 +477,14 @@ void MMTSNE::symmetrize(std::vector<double> &M) {
 */
 void MMTSNE::update_imp_W(const std::vector<double> &W) {	
 	for (size_t ri = 0; ri < x_rows; ++ri) {
-		double sum = 0;
+		double sum = DBL_MIN;
 		for (size_t m = 0; m < y_maps; ++m) {
-			double xp = exp(W[ri*y_maps + m]);			
-			if (isnan(xp) || isinf(xp)) {
-				std::cout << "";
-			}
-			else {
-				iW[ri*y_maps + m] = xp;
-				sum += xp;
-			}			
+			iW[ri*y_maps + m] = exp(W[ri*y_maps + m]);
+			sum += iW[ri*y_maps + m];			
 		}
 		
 		for (size_t m = 0; m < y_maps; ++m) {
-			iW[ri*y_maps + m] /= sum;
-			if (isnan(iW[ri*y_maps + m])) {
-				std::cout << "";
-			}
-			/*else {
-				iW[ri*y_maps + m] = DBL_MIN;					
-			}*/
-			
+			iW[ri*y_maps + m] /= sum;			
 		}		
 	}
 }
@@ -516,128 +492,164 @@ void MMTSNE::update_imp_W(const std::vector<double> &W) {
 // Compute the squared Euclidean distance matrix
 void MMTSNE::compute_distance(const std::vector<double> &M, const size_t &dim, 
 	std::vector<double> &DD) {
-//	DD.assign(x_rows * x_rows, 0);
-//	for (size_t ri = 0; ri < x_rows; ++ri) {
-//		DD[ri*x_rows + ri] = 0;
-//		for (size_t rj = 0; rj < ri; ++rj) {
-//			for (size_t d = 0; d < dim; ++d) {
-//				DD[ri*x_rows + rj] += pow(M[ri*x_rows + d] - M[rj*x_rows + d], 2);
-//			}
-//			DD[rj*x_rows + ri] = DD[ri*x_rows + rj];
-//		}
-//	}
+	//DD.assign(x_rows * x_rows, 0);
+	for (size_t ri = 0; ri < x_rows; ++ri) {
+		DD[ri*x_rows + ri] = 0;
+		for (size_t rj = 0; rj < ri; ++rj) {
+			for (size_t d = 0; d < dim; ++d) {
+				DD[ri*x_rows + rj] += pow(M[ri*x_rows + d] - M[rj*x_rows + d], 2);
+			}
+			DD[rj*x_rows + ri] = DD[ri*x_rows + rj];
+		}
+	}
 }	
 
 // Compute input similarities using a Gaussian kernel with a fixed perplexity
-void MMTSNE::compute_Gaussian_kernel(const std::vector<double> &X_dist, std::vector<double> &P,
+void MMTSNE::compute_Gaussian_kernel(const double *X_dist, double *P,
 	size_t row_from, size_t row_to, size_t thread_id) {
 	// Compute Gaussian kernel row by row
 	clock_t start = clock();
-	//for (size_t r = row_from; r < row_to; ++r) {
-	//	// Initialize some variables		
-	//	double beta = 1.0;
-	//	double min_beta = -DBL_MAX, max_beta = DBL_MAX;
-	//	double tol = 1e-5;
-	//	double sum_P;
+	for (size_t r = row_from; r < row_to; ++r) {
+		// Initialize some variables		
+		double beta = 1.0;
+		double min_beta = -DBL_MAX, max_beta = DBL_MAX;
+		double tol = 1e-5;
+		double sum_P = DBL_MIN;
 
-	//	// Iterate until a good perplexity is found using Binary Search
-	//	for (size_t iter = 0; iter < 200; ++iter) {
-	//		double H = 0;
-	//		// Compute Gaussian kernel row
-	//		for (size_t c = 0; c < P.cols(); ++c) {
-	//			if (r == c) P(r, c) = DBL_MIN;
-	//			else P(r, c) = exp(-beta * X_dist(r, c));
-	//			H += beta * (X_dist(r, c) * P(r, c));
-	//		}
-	//		// Compute entropy of current row
-	//		sum_P = P.row(r).sum() + DBL_MIN;
-	//		H = (H / sum_P) + log(sum_P);
+		// Iterate until a good perplexity is found using Binary Search
+		for (size_t iter = 0; iter < 200; ++iter) {
+			double H = 0;
+			// Compute Gaussian kernel row
+			for (size_t c = 0; c < x_rows; ++c) {
+				if (r == c) P[r*x_rows + c] = DBL_MIN;
+				else P[r*x_rows + c] = exp(-beta * X_dist[r*x_rows + c]);
+				H += beta * (X_dist[r*x_rows + c] * P[r*x_rows + c]);
+			}
 
-	//		// Evaluate whether the entropy is within the tolerance level
-	//		double H_diff = abs(H - log(perplexity));
-	//		if (H_diff < tol) {
-	//			break;
-	//		}
-	//		else {
-	//			if (H_diff > 0) {
-	//				min_beta = beta;
-	//				if (max_beta == DBL_MAX || max_beta == -DBL_MAX) beta *= 2.0;
-	//				else beta = (beta + max_beta) / 2.0;
-	//			}
-	//			else {
-	//				max_beta = beta;
-	//				if (min_beta == -DBL_MAX || min_beta == DBL_MAX) beta /= 2.0;
-	//				else beta = (beta + min_beta) / 2.0;
-	//			}
-	//		}
-	//	}
-	//	// Row normalize P
-	//	for (size_t c = 0; c < P.cols(); ++c) P(r, c) /= sum_P;
-	//}
-	//clock_t end = clock();
-	//if (verbose) {
-	//	std::cout << "\t\tSNE | Thread #" << thread_id << " has ended | Time taken: " <<
-	//		std::setprecision(3) << (end - start) / CLOCKS_PER_SEC << " seconds" << std::endl;
-	//}
+			// Compute entropy of current row
+			for (size_t c = 0; c < x_rows; ++c) {
+				sum_P += P[r*x_rows + c];
+			}			
+			H = (H / sum_P) + log(sum_P);
+
+			// Evaluate whether the entropy is within the tolerance level
+			double H_diff = abs(H - log(perplexity));
+			if (H_diff < tol) {
+				break;
+			}
+			else {
+				if (H_diff > 0) {
+					min_beta = beta;
+					if (max_beta == DBL_MAX || max_beta == -DBL_MAX) beta *= 2.0;
+					else beta = (beta + max_beta) / 2.0;
+				}
+				else {
+					max_beta = beta;
+					if (min_beta == -DBL_MAX || min_beta == DBL_MAX) beta /= 2.0;
+					else beta = (beta + min_beta) / 2.0;
+				}
+			}
+		}
+		// Row normalize P
+		for (size_t c = 0; c < x_rows; ++c) P[r*x_rows + c] /= sum_P;
+	}
+	clock_t end = clock();
+	if (verbose) {
+		std::cout << "\t\tSNE | Thread #" << thread_id << " has ended | Time taken: " <<
+			std::setprecision(3) << (end - start) / CLOCKS_PER_SEC << " seconds" << std::endl;
+	}
 }
 
 // Stochastic Neighborhood Embedding: convert high-dimensional Euclidean distance
 // between data points into conditional probabilities that represent similarities
 void MMTSNE::compute_SNE(std::vector<double> &P) {
-	//std::vector<std::thread> thread_pool;
-	//size_t max_threads = std::thread::hardware_concurrency() + 1;
-	//size_t block = P.rows() / max_threads;
+	std::vector<std::thread> thread_pool;
+	size_t max_threads = std::thread::hardware_concurrency() + 1;
+	size_t block = x_rows / max_threads;
 
-	//Eigen::MatrixXd X_dist(X.rows(), X.rows());
-	//// Compute the squared Euclidean distance matrix
-	//compute_distance(X, X_dist);
+	std::vector<double> X_dist(x_rows * x_rows, 0);
+	// Compute the squared Euclidean distance matrix
+	compute_distance(X, x_dims, X_dist);
 
-	//if (block == 0) {
-	//	// Since (rows < max_threads) do not launch threads
-	//	compute_Gaussian_kernel(X_dist, P, 0, P.rows(), 0);
-	//}
-	//else {
-	//	for (size_t r = 0, thread_id = 1; r < P.rows(); r += block, ++thread_id) {			
-	//		if (verbose) {
-	//			std::cout << "\t\tSNE | Launching thread #" << thread_id << " | Rows [" << r <<
-	//				", " << (((r + block) > P.rows())? P.rows() : (r + block)) << "]" << 
-	//				std::endl;
-	//		}
-	//		thread_pool.push_back(std::thread(&MMTSNE::compute_Gaussian_kernel, this,
-	//				X_dist, P, r, (((r + block) > P.rows()) ? P.rows() : (r + block)), thread_id));
-	//	}
-	//}
-	//// Synchronize threads
-	//for (auto &t : thread_pool) {
-	//	if (t.joinable()) t.join();
-	//}	
+	if (block == 0) {
+		// Since (rows < max_threads) do not launch threads
+		compute_Gaussian_kernel(X_dist.data(), P.data(), 0, x_rows, 0);
+	}
+	else {
+		for (size_t r = 0, thread_id = 1; r < x_rows; r += block, ++thread_id) {			
+			if (verbose) {
+				std::cout << "\t\tSNE | Launching thread #" << thread_id << " | Rows [" << r <<
+					", " << (((r + block) > x_rows)? x_rows : (r + block)) << "]" << 
+					std::endl;
+			}
+			thread_pool.push_back(std::thread(&MMTSNE::compute_Gaussian_kernel, this,
+					X_dist.data(), P.data(), r, (((r + block) > x_rows) ? x_rows : (r + block)), 
+					thread_id));
+		}
+	}
+	// Synchronize threads
+	for (auto &t : thread_pool) {
+		if (t.joinable()) t.join();
+	}
+		
+	// Symmetrize P
+	double sum = std::accumulate(P.begin(), P.end(), DBL_MIN);
+	for (size_t ri = 0; ri < x_rows; ++ri) {
+		P[ri*x_rows + ri] = (P[ri*x_rows + ri] * 2) / sum;
+		/*if (P[ri*x_rows + ri] < DBL_MIN) P[ri*x_rows + ri] = DBL_MIN;*/
+		for (size_t rj = 0; rj < ri; ++rj) {
+			P[ri*x_rows + rj] = (P[ri*x_rows + rj] + P[rj*x_rows + ri]) / sum;
+			P[rj*x_rows + ri] = P[ri*x_rows + rj];
+			/*if (P[ri*x_rows + rj] < DBL_MIN) {
+				P[ri*x_rows + rj] = DBL_MIN;
+				P[rj*x_rows + ri] = DBL_MIN;
+			}
+			else {
+				P[rj*x_rows + ri] = P[ri*x_rows + rj];
+			}*/
+		}
+	}
 }
 
 // Normalizes matrix (zero mean in the range [-1,1]
-void MMTSNE::normalize(std::vector<double> &M) {
+void MMTSNE::normalize(std::vector<double> &M, const size_t &rows, const size_t &cols) {
 	// Matrix mean
-	//double mean = M.mean();
-	//
-	//// Mean subtracted absolute max element in matrix
-	//double abs_max = abs(M.maxCoeff() - mean);
-	//double abs_min = abs(M.minCoeff() - mean);
-	//double max = abs_max > abs_min ? abs_max : abs_min;
-	//
-	//// Normalize matrix
-	//for (size_t r = 0; r < M.rows(); ++r) {
-	//	for (size_t c = 0; c < M.cols(); ++c) {
-	//		M[r, c] = (M[r,c] - mean) / max;
-	//	}
-	//}	
+	double sum = std::accumulate(M.begin(), M.end(), 0.0);
+	double mean = sum / M.size();
+	
+	double abs_max = DBL_MIN;
+	double abs_min = DBL_MAX;
+
+	for (size_t i = 0; i < M.size(); ++i) {		
+		if (M[i] > abs_max) abs_max = M[i];
+		if (M[i] < abs_min) abs_min = M[i];
+	}
+
+	// Mean subtracted absolute max element in matrix
+	abs_max = abs(abs_max - mean);
+	abs_min = abs(abs_min - mean);
+	double max = abs_max > abs_min ? abs_max : abs_min;
+	
+	// Normalize matrix
+	for (size_t r = 0; r < rows; ++r) {
+		for (size_t c = 0; c < cols; ++c) {
+			M[r*cols + c] = (M[r*cols + c] - mean) / (max + DBL_MIN);
+		}
+	}	
 }
 
 
-
-// Load high-dimensional input vector data from a CSV file
+// Load high-dimensional input vector data from a CSV file (default perplexity: 30)
 bool MMTSNE::load_input_vectors_csv(const std::string &fileName, const char &delimiter) {
+	return load_input_vectors_csv(fileName, delimiter, 30);
+}
+
+// Load high-dimensional input vector data from a CSV file with perplexity value
+bool MMTSNE::load_input_vectors_csv(const std::string &fileName, const char &delimiter,
+	const size_t &perplexity) {
 	std::ifstream input_csv;
-	input_csv.open(fileName);
-	std::string line;	
+
+	std::string line;
 	size_t rows = 0;
 	size_t cols_prev = 0, cols = 0;
 	clock_t start, end;
@@ -645,39 +657,51 @@ bool MMTSNE::load_input_vectors_csv(const std::string &fileName, const char &del
 	std::cout << "Loading input vectors matrix..." << std::endl;
 
 	start = clock();
-	while (std::getline(input_csv, line)) {
-		std::stringstream lineStream(line);
-		std::string cell;
-		cols = 0;
-		while (std::getline(lineStream, cell, delimiter)) {
-			try {
-				X.push_back(std::stod(cell));
-				++cols;
+	try {
+		input_csv.open(fileName);
+		while (std::getline(input_csv, line)) {
+			std::stringstream lineStream(line);
+			std::string cell;
+			cols = 0;
+			while (std::getline(lineStream, cell, delimiter)) {
+				try {
+					X.push_back(std::stod(cell));
+					++cols;
+				}
+				catch (std::exception &e) {
+					std::cout << "Exception at row # " << rows << " | Value: " <<
+						cell << std::endl;
+					std::cout << " >> Message: " << e.what() << std::endl;
+					return false;
+				}
 			}
-			catch (std::exception &e) {
-				std::cout << "Exception at row # " << rows << " | Value: " << 
-					cell << std::endl;
-				std::cout << " >> Message: " << e.what() << std::endl;
+			++rows;
+			if (cols_prev != cols && rows > 2) {
+				std::cout << "Exception at row # " << rows << ": Expecting " <<
+					cols_prev << " columns but found " << cols << " columns" << std::endl;
 				return false;
-			}			
+			}
+			cols_prev = cols;
 		}
-		++rows;
-		if (cols_prev != cols && rows > 2) {			
-			std::cout << "Exception at row # " << rows << ": Expecting " <<
-				cols_prev << " columns but found " << cols << " columns" << std::endl;
-			return false;
-		}
-		cols_prev = cols;
 	}
+	catch (std::exception &e) {
+		std::cout << "Exception loading input vector file: " << e.what() << std::endl;
+		return false;
+	}
+
 	end = clock();
+
+	// Set class variables
 	x_rows = rows;
 	x_dims = cols;
-		
+	this->perplexity = perplexity;
+	status = input_vectors;
+
 	std::cout << "\t Done. Matrix of size: " << rows << " x " << cols
 		<< " loaded." << "\n\t Time taken: " << std::setprecision(5) <<
 		(double)(end - start) / CLOCKS_PER_SEC << " seconds" << std::endl;
 
-	status = input_vectors;
+	return true;
 }
 
 // Load high-dimensional input probability data from a CSV file
@@ -738,7 +762,7 @@ bool MMTSNE::load_input_probability_csv(const std::string &fileName,
 		<< " loaded." << "\n\t Time taken: " << std::setprecision(5) <<
 		(double)(end - start) / CLOCKS_PER_SEC	<< " seconds" << std::endl;
 
-	// TODO: Normalize P matrix
+	// Normalize P matrix
 	double sum = 0;
 	for (size_t ri = 0; ri < x_rows; ++ri) {
 		double row_sum = 0;
@@ -767,31 +791,82 @@ bool MMTSNE::load_input_probability_csv(const std::string &fileName,
 		}
 	}
 
-	status = input_probability;	
+	status = input_probability;
+
+	return true;
 }
 
 // Save low-dimensional output data to a CSV file
-bool MMTSNE::save_output_vectors_csv(const std::string &fileName, const char &delimiter) {
+void MMTSNE::save_output_csv(const std::string &fileName) {
 	std::ofstream output_csv;
 	try {
-		output_csv.open(fileName, std::ios::out);
+		// Save low-dimensional vectors Y & importance weights iW to file
+		output_csv.open(fileName + ".csv", std::ios::out);
 		for (size_t m = 0; m < y_maps; ++m) {
 			size_t base1 = m * x_rows * y_dims;
 			for (size_t r = 0; r < x_rows; ++r) {
 				size_t base2 = r * y_dims;
-				output_csv << (m + 1) << "," << iW[r*y_maps + m] << ",";
+				output_csv << (m + 1) << "," << iW_best[r*y_maps + m] << ",";
 				for (size_t d = 0; d < y_dims; ++d) {
-					output_csv << Y[base1 + base2 + d] << (d == (y_dims - 1) ? "\n" : ",");
+					output_csv << Y_best[base1 + base2 + d] << (d == (y_dims - 1) ? "\n" : ",");
 				}
 			}
 		}
 		output_csv.close();
 		std::cout << "Output file saved" << std::endl;
-		return true;
 	}
 	catch (std::exception &e) {
 		std::cout << "Exception while saving CSV output file: " << e.what() << std::endl;
-		if (output_csv.is_open()) output_csv.close();
-		return false;
+		if (output_csv.is_open()) output_csv.close();		
+	}
+
+	// Save map statistics to file
+	try {		
+		output_csv.open(fileName + "_stats.txt", std::ios::out);
+		for (size_t m = 0; m < y_maps; ++m) {
+			double sum_w = 0;
+			int ws[10] = { 0 };
+			for (size_t r = 0; r < x_rows; ++r) {
+				sum_w += iW[r*y_maps + m];
+				if (iW[r*y_maps + m] > 0.9) ws[9] += 1;
+				else if (iW[r*y_maps + m] > 0.8) ws[8] += 1;
+				else if (iW[r*y_maps + m] > 0.7) ws[7] += 1;
+				else if (iW[r*y_maps + m] > 0.6) ws[6] += 1;
+				else if (iW[r*y_maps + m] > 0.5) ws[5] += 1;
+				else if (iW[r*y_maps + m] > 0.4) ws[4] += 1;
+				else if (iW[r*y_maps + m] > 0.3) ws[3] += 1;
+				else if (iW[r*y_maps + m] > 0.2) ws[2] += 1;
+				else if (iW[r*y_maps + m] > 0.1) ws[1] += 1;
+				else ws[0] += 1;
+			}
+			std::cout << "Map # " << m << " | Sum of weights: " << sum_w
+				<< std::endl;
+			for (size_t i = 0; i < 10; ++i) {
+				output_csv << "  " << std::setprecision(3) << (float)(i) / 10
+					<< " - " << (float)(i + 1) / 10 << " : " << ws[i] << std::endl;
+			}
+		}
+		output_csv.close();
+		std::cout << "Output map statistics files saved" << std::endl;
+	}
+	catch (std::exception &e) {
+		std::cout << "Exception while saving map statistics output file: " 
+			<< e.what() << std::endl;
+		if (output_csv.is_open()) output_csv.close();		
+	}
+
+	// Save error list to file
+	try {		
+		output_csv.open(fileName + "_KL_errors.csv", std::ios::out);
+		for (auto &err : error_list) {
+			output_csv << std::setprecision(15) << err << "\n";
+		}
+		output_csv.close();
+		std::cout << "Output KL errors saved to file" << std::endl;
+	}
+	catch (std::exception &e) {
+		std::cout << "Exception while saving KL errors output file: " 
+			<< e.what() << std::endl;
+		if (output_csv.is_open()) output_csv.close();		
 	}	
 }
