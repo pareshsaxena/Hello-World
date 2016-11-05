@@ -25,9 +25,8 @@
 */
 
 #pragma once
-#include <memory>
+
 #include <vector>
-#include <Eigen/Dense>
 
 enum State { input_vectors, input_probability, empty };
 
@@ -35,8 +34,7 @@ class MMTSNE
 {
 public:
 	// Class constructor
-	MMTSNE();
-	MMTSNE(double perplexity);
+	MMTSNE();	
 
 	// Class destructor
 	~MMTSNE();
@@ -44,29 +42,36 @@ public:
 	// Perform MM t-SNE
 	void construct_maps();
 	void construct_maps(bool verbose);
-	void construct_maps(int y_dims, int y_maps, int iterations, bool verbose);
+	void construct_maps(size_t y_dims, size_t y_maps, size_t max_iter, bool verbose);
 
 	// Load high-dimensional input vector data from a CSV file
 	bool load_input_vectors_csv(const std::string &fileName, const char &delimiter);
+	bool load_input_vectors_csv(const std::string &fileName, const char &delimiter, 
+		const size_t &perplexity);
+	
 	// Load high-dimensional input probability data from a CSV file
 	bool load_input_probability_csv(const std::string &fileName, const char &delimiter);
+	
 	// Save low-dimensional output vector data to a CSV file
-	bool save_output_vectors_csv(const std::string &fileName, const char &delimiter);
+	void save_output_csv(const std::string &fileName);
 
 	
 private:
 	// MM t-SNE data structures
-	std::vector<double> X;							// Normalized input high-dimensional dataset
-	std::vector<double> Y;							// Output low-dimensional dataset								
-	std::vector<double> iW;							// Importance weights	
-	std::vector<double> P;							// Input pairwise similarity matrix
+	std::vector<double> X;					// Normalized input high-dimensional dataset
+	std::vector<double> Y;					// Output low-dimensional dataset								
+	std::vector<double> iW;					// Importance weights	
+	std::vector<double> P;					// Input pairwise similarity matrix
+	std::vector<double> Y_best;
+	std::vector<double> iW_best;
+	std::vector<double> error_list;
 	
 	// MM t-SNE variables
-	size_t x_rows;									// Number of vectors in high-dimensional dataset X
-	size_t x_dims;									// Number of dimensions in low - dimensional dataset Y	
-	size_t y_dims;									// Number of dimensions in low-dimensional dataset Y
-	size_t y_maps;									// Number of maps in MM t-SNE	
-	double perplexity = 30; 						// A smooth measure of the effective number of neighbours: Perp(P_{i}) = 2^{H(P_{i})} where H(P_{i}) is Shannon entropy of P_{i}
+	size_t x_rows;						// Number of vectors in high-dimensional dataset X
+	size_t x_dims;						// Number of dimensions in high-dimensional dataset X	
+	size_t y_dims;						// Number of dimensions in low-dimensional dataset Y
+	size_t y_maps;						// Number of maps in MM t-SNE	
+	double perplexity = 30; 				// A smooth measure of the effective number of neighbours: Perp(P_{i}) = 2^{H(P_{i})} where H(P_{i}) is Shannon entropy of P_{i}
 	
 	State status = empty;
 
@@ -81,8 +86,9 @@ private:
 
 	// Compute gradient of cost function w.r.t low dimensional map points
 	void Y_gradients(double *dCdY, double *dCdY_exp, double *dCdD, double *epsilon_Y,
-		const std::vector<double> &P, const std::vector<double> &Q, const std::vector<double> &YD,
-		const double &Z, const double &alpha, const double &epsilon_inc, const double &epsilon_dec);
+		const std::vector<double> &P, const std::vector<double> &Q, 
+		const std::vector<double> &YD, const double &Z, const double &alpha, 
+		const double &epsilon_inc, const double &epsilon_dec);
 
 	// Compute gradient of cost function w.r.t unconstrained weights
 	void W_gradients(double *dCdW, double *dCdW_exp, double *dCdP, double *W,
@@ -93,9 +99,8 @@ private:
 	// Compute importance weights expressed in terms of unconstrained weights
 	void update_imp_W(const std::vector<double> &W);
 
-
 	// Compute input similarities using a Gaussian kernel with a fixed perplexity
-	void compute_Gaussian_kernel(const std::vector<double> &X_dist, std::vector<double> &P,
+	void compute_Gaussian_kernel(const double *X_dist, double *P,
 		size_t row_from, size_t row_to, size_t thread_id);
 
 	// Compute the squared Euclidean distance matrix
@@ -106,9 +111,5 @@ private:
 	void compute_SNE(std::vector<double> &P);
 
 	// Normalizes matrix (zero mean in the range [-1,1]
-	void normalize(std::vector<double> &M);
-
-	// Symmetrize matrix
-	void symmetrize(std::vector<double> &M);
-	
+	void normalize(std::vector<double> &M, const size_t &rows, const size_t &cols);	
 };
