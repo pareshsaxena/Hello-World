@@ -595,18 +595,10 @@ void MMTSNE::compute_SNE(std::vector<double> &P) {
 	// Symmetrize P
 	double sum = std::accumulate(P.begin(), P.end(), DBL_MIN);
 	for (size_t ri = 0; ri < x_rows; ++ri) {
-		P[ri*x_rows + ri] = (P[ri*x_rows + ri] * 2) / sum;
-		/*if (P[ri*x_rows + ri] < DBL_MIN) P[ri*x_rows + ri] = DBL_MIN;*/
+		P[ri*x_rows + ri] = (P[ri*x_rows + ri] * 2) / sum;		
 		for (size_t rj = 0; rj < ri; ++rj) {
 			P[ri*x_rows + rj] = (P[ri*x_rows + rj] + P[rj*x_rows + ri]) / sum;
-			P[rj*x_rows + ri] = P[ri*x_rows + rj];
-			/*if (P[ri*x_rows + rj] < DBL_MIN) {
-				P[ri*x_rows + rj] = DBL_MIN;
-				P[rj*x_rows + ri] = DBL_MIN;
-			}
-			else {
-				P[rj*x_rows + ri] = P[ri*x_rows + rj];
-			}*/
+			P[rj*x_rows + ri] = P[ri*x_rows + rj];			
 		}
 	}
 }
