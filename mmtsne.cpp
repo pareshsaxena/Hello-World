@@ -833,6 +833,8 @@ void MMTSNE::save_output_csv(const std::string &fileName) {
 			}
 			std::cout << "Map # " << m << " | Sum of weights: " << sum_w
 				<< std::endl;
+			output_csv << "Map # " << m << " | Sum of weights: " << 
+				std::setprecision(4) << sum_w << std::endl;
 			for (size_t i = 0; i < 10; ++i) {
 				output_csv << "  " << std::setprecision(3) << (float)(i) / 10
 					<< " - " << (float)(i + 1) / 10 << " : " << ws[i] << std::endl;
