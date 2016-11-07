@@ -1,0 +1,17 @@
+CC= cl
+CFLAGS= /c /EHsc
+PROG= MM_t-SNE.exe
+
+mmtsne: main.obj mmtsne.obj
+	$(CC) main.obj mmtsne.obj /link /out:$(PROG)
+	
+main.obj: main.cpp
+	$(CC) $(CFLAGS) main.cpp
+	
+mmtsne.obj: mmtsne.cpp
+	$(CC) $(CFLAGS) mmtsne.cpp
+	
+all: mmtsne
+
+clean:
+	del *.obj
