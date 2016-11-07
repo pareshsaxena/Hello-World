@@ -112,9 +112,9 @@ void MMTSNE::construct_maps(size_t y_dims, size_t y_maps, size_t max_iter, bool 
 	// Gradient descent parameters	
 	int stop_lying_iter = (max_iter*0.05 > 30) ? 30 : (int)(max_iter*0.05);	
 	
-	double alpha = 0.65;												// Exponential smoothing parameter
-	double epsilon_inc = 10; 											// Epsilon increment parameter (linear)
-	double epsilon_dec = 0.55;											// Epsilon decrement parameter (exponential); should be in the range (0.1, 0.7]
+	double alpha = 0.75;												// Exponential smoothing parameter; should be in the range (0.1, 1]
+	double epsilon_inc = 0.4; 											// Epsilon increment parameter (linear)
+	double epsilon_dec = 0.45;											// Epsilon decrement parameter (exponential); should be in the range (0.1, 0.7]
 		
 	double alpha_update = (1 - alpha) / max_iter;						
 	double epsilon_dec_update = (epsilon_dec - 0.1) / max_iter;
@@ -125,9 +125,9 @@ void MMTSNE::construct_maps(size_t y_dims, size_t y_maps, size_t max_iter, bool 
 	error_list.clear();
 		
 	// Lie about high-dimensional probabilities (P *= 4.0)	
-	for (size_t i = 0; i < P.size(); ++i) {
+	/*for (size_t i = 0; i < P.size(); ++i) {
 		P[i] *= 4.0;
-	}
+	}*/
 
 	std::default_random_engine generator(time(NULL));
 	std::normal_distribution<double> norm_dist(0.0, 1.0);				// Normal distribution with mean 0 & sigma 1.0
@@ -212,11 +212,11 @@ void MMTSNE::construct_maps(size_t y_dims, size_t y_maps, size_t max_iter, bool 
 		if (W_thread.joinable()) W_thread.join();				
 
 		// It's about time we stopped lying about probabilites, dear... (P /= 4.0)		
-		if (iter == stop_lying_iter) {
+		/*if (iter == stop_lying_iter) {
 			for (size_t i = 0; i < P.size(); ++i) {
 				P[i] /= 4.0;
 			}			
-		}
+		}*/
 		
 	}
 	if (verbose) {
@@ -452,7 +452,7 @@ void MMTSNE::W_gradients(double *dCdW, double *dCdW_exp, double *dCdP, double *W
 		// Keep weights negative
 		for (size_t m = 0; m < y_maps; ++m) {
 			W[base1 + m] -= max_w;
-			if (W[base1 + m] < -1e20) {
+			if (W[base1 + m] < -1e6) {
 				reset = true;
 				break;
 			}
@@ -494,12 +494,13 @@ void MMTSNE::compute_distance(const std::vector<double> &M, const size_t &dim,
 	std::vector<double> &DD) {
 	//DD.assign(x_rows * x_rows, 0);
 	for (size_t ri = 0; ri < x_rows; ++ri) {
-		DD[ri*x_rows + ri] = 0;
+		size_t base1 = ri*x_rows;
+		DD[base1 + ri] = 0;
 		for (size_t rj = 0; rj < ri; ++rj) {
 			for (size_t d = 0; d < dim; ++d) {
-				DD[ri*x_rows + rj] += pow(M[ri*x_rows + d] - M[rj*x_rows + d], 2);
+				DD[base1 + rj] += pow(M[ri*dim + d] - M[rj*dim + d], 2);
 			}
-			DD[rj*x_rows + ri] = DD[ri*x_rows + rj];
+			DD[rj*x_rows + ri] = DD[base1 + rj];
 		}
 	}
 }	
@@ -511,7 +512,7 @@ void MMTSNE::compute_Gaussian_kernel(const double *X_dist, double *P,
 	clock_t start = clock();
 	for (size_t r = row_from; r < row_to; ++r) {
 		// Initialize some variables		
-		double beta = 1.0;
+		double beta = 1;
 		double min_beta = -DBL_MAX, max_beta = DBL_MAX;
 		double tol = 1e-5;
 		double sum_P = DBL_MIN;
@@ -521,20 +522,27 @@ void MMTSNE::compute_Gaussian_kernel(const double *X_dist, double *P,
 			double H = 0;
 			// Compute Gaussian kernel row
 			for (size_t c = 0; c < x_rows; ++c) {
-				if (r == c) P[r*x_rows + c] = DBL_MIN;
-				else P[r*x_rows + c] = exp(-beta * X_dist[r*x_rows + c]);
-				H += beta * (X_dist[r*x_rows + c] * P[r*x_rows + c]);
+				if (r == c) {
+					P[r*x_rows + c] = DBL_MIN;
+				}
+				else {
+					P[r*x_rows + c] = exp(-beta * X_dist[r*x_rows + c]);
+				}
+				//H += beta * (X_dist[r*x_rows + c] * P[r*x_rows + c]);
 			}
 
 			// Compute entropy of current row
+			sum_P = DBL_MIN;
 			for (size_t c = 0; c < x_rows; ++c) {
 				sum_P += P[r*x_rows + c];
+				H += beta * (X_dist[r*x_rows + c] * P[r*x_rows + c]);
 			}			
 			H = (H / sum_P) + log(sum_P);
 
 			// Evaluate whether the entropy is within the tolerance level
-			double H_diff = abs(H - log(perplexity));
-			if (H_diff < tol) {
+			double H_diff = H - log(perplexity);
+			
+			if (abs(H_diff) < tol) {
 				break;
 			}
 			else {
@@ -554,9 +562,11 @@ void MMTSNE::compute_Gaussian_kernel(const double *X_dist, double *P,
 		for (size_t c = 0; c < x_rows; ++c) P[r*x_rows + c] /= sum_P;
 	}
 	clock_t end = clock();
-	if (verbose) {
-		std::cout << "\t\tSNE | Thread #" << thread_id << " has ended | Time taken: " <<
-			std::setprecision(3) << (end - start) / CLOCKS_PER_SEC << " seconds" << std::endl;
+	if (verbose) {		
+		std::stringstream ss;
+		ss << "\t\tSNE | Thread #" << thread_id << " has ended | Time taken: " <<
+			((float)(end - start) / CLOCKS_PER_SEC) << " seconds\n";
+		std::cout << ss.str();
 	}
 }
 
@@ -570,7 +580,7 @@ void MMTSNE::compute_SNE(std::vector<double> &P) {
 	std::vector<double> X_dist(x_rows * x_rows, 0);
 	// Compute the squared Euclidean distance matrix
 	compute_distance(X, x_dims, X_dist);
-
+	
 	if (block == 0) {
 		// Since (rows < max_threads) do not launch threads
 		compute_Gaussian_kernel(X_dist.data(), P.data(), 0, x_rows, 0);
@@ -578,9 +588,10 @@ void MMTSNE::compute_SNE(std::vector<double> &P) {
 	else {
 		for (size_t r = 0, thread_id = 1; r < x_rows; r += block, ++thread_id) {			
 			if (verbose) {
-				std::cout << "\t\tSNE | Launching thread #" << thread_id << " | Rows [" << r <<
-					", " << (((r + block) > x_rows)? x_rows : (r + block)) << "]" << 
-					std::endl;
+				std::stringstream ss;
+				ss << "\t\tSNE | Launching thread #" << thread_id << " | Rows [" << r <<
+					", " << (((r + block) > x_rows) ? x_rows : (r + block)) << ")\n";
+				std::cout << ss.str();
 			}
 			thread_pool.push_back(std::thread(&MMTSNE::compute_Gaussian_kernel, this,
 					X_dist.data(), P.data(), r, (((r + block) > x_rows) ? x_rows : (r + block)), 
@@ -686,7 +697,8 @@ bool MMTSNE::load_input_vectors_csv(const std::string &fileName, const char &del
 	// Set class variables
 	x_rows = rows;
 	x_dims = cols;
-	this->perplexity = perplexity;
+	this->perplexity = perplexity;	
+	P.resize(x_rows * x_rows);
 	status = input_vectors;
 
 	std::cout << "\t Done. Matrix of size: " << rows << " x " << cols
