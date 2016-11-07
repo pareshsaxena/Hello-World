@@ -24,6 +24,7 @@
 *
 */
 
+#include <cfloat>
 #include <cmath>
 #include <exception>
 #include <fstream>
@@ -62,8 +63,7 @@ void MMTSNE::construct_maps(size_t y_dims, size_t y_maps, size_t max_iter, bool 
 	this->y_maps = y_maps;
 	this->y_dims = y_dims;
 
-	// Miscellaneous parameters
-	double total_time = 0.0;
+	// Miscellaneous parameters	
 	clock_t start, end;
 
 	switch (status) {
@@ -91,30 +91,30 @@ void MMTSNE::construct_maps(size_t y_dims, size_t y_maps, size_t max_iter, bool 
 	
 	// MM t-SNE data structures
 	std::vector<double> YD(x_rows * x_rows * y_maps, 0);				// Output pairwise distance matrix
-	std::vector<double> Q(x_rows * x_rows, 0);							// Output pairwise similarity matrix			
+	std::vector<double> Q(x_rows * x_rows, 0);					// Output pairwise similarity matrix			
 	
 	std::vector<double> W(x_rows * y_maps, 1.0 / y_maps);				// Weights matrix initialized with (1/ y_maps)
 																	
-	iW.resize(x_rows * y_maps);											// Resize importance weights matrix to size of W	
+	iW.resize(x_rows * y_maps);							// Resize importance weights matrix to size of W	
 	
 	// Gradient descent data structures
 	std::vector<double> dCdY(x_rows * y_dims * y_maps, 0);				// Derivative of cost function w.r.t Y
 	std::vector<double> dCdD(x_rows * x_rows * y_maps, 0);				// Derivative of cost function w.r.t Y distances
-	std::vector<double> dCdW(x_rows * y_maps, 0);						// Derivative of cost function w.r.t W
-	std::vector<double> dCdP(x_rows * y_maps, 0);						// Derivative of cost function w.r.t importance weights
+	std::vector<double> dCdW(x_rows * y_maps, 0);					// Derivative of cost function w.r.t W
+	std::vector<double> dCdP(x_rows * y_maps, 0);					// Derivative of cost function w.r.t importance weights
 
 	std::vector<double> dCdY_exp(x_rows * y_dims * y_maps, 0);			// Exponential smoothing of the derivative of cost function w.r.t Y
-	std::vector<double> dCdW_exp(x_rows * y_maps, 0);					// Exponential smoothing of the derivative of cost function w.r.t W
+	std::vector<double> dCdW_exp(x_rows * y_maps, 0);				// Exponential smoothing of the derivative of cost function w.r.t W
 
 	std::vector<double> epsilon_Y(x_rows * y_dims * y_maps, 1);			// Learning rates for Y
-	std::vector<double> epsilon_W(x_rows * y_maps, 1);					// Learning rates for W
+	std::vector<double> epsilon_W(x_rows * y_maps, 1);				// Learning rates for W
 		
 	// Gradient descent parameters	
 	int stop_lying_iter = (max_iter*0.05 > 30) ? 30 : (int)(max_iter*0.05);	
 	
-	double alpha = 0.75;												// Exponential smoothing parameter; should be in the range (0.1, 1]
-	double epsilon_inc = 0.4; 											// Epsilon increment parameter (linear)
-	double epsilon_dec = 0.45;											// Epsilon decrement parameter (exponential); should be in the range (0.1, 0.7]
+	double alpha = 0.75;								// Exponential smoothing parameter; should be in the range (0.1, 1]
+	double epsilon_inc = 0.4; 							// Epsilon increment parameter (linear)
+	double epsilon_dec = 0.45;							// Epsilon decrement parameter (exponential); should be in the range (0.1, 0.6] 0.7]
 		
 	double alpha_update = (1 - alpha) / max_iter;						
 	double epsilon_dec_update = (epsilon_dec - 0.1) / max_iter;
@@ -201,8 +201,8 @@ void MMTSNE::construct_maps(size_t y_dims, size_t y_maps, size_t max_iter, bool 
 		std::thread Y_thread(&MMTSNE::Y_gradients, this, dCdY.data(), dCdY_exp.data(), 
 			dCdD.data(), epsilon_Y.data(), P, Q, YD, Z, alpha, epsilon_inc, epsilon_dec);		
 		
-		dCdP.assign(x_rows * y_maps, 0);								// Reset dCdP matrix elements to 0
-		dCdW.assign(x_rows * y_maps, 0);								// Reset dCdW matrix elements to 0
+		dCdP.assign(x_rows * y_maps, 0);							// Reset dCdP matrix elements to 0
+		dCdW.assign(x_rows * y_maps, 0);							// Reset dCdW matrix elements to 0
 		// Compute W gradients and update W
 		std::thread W_thread(&MMTSNE::W_gradients, this, dCdW.data(), dCdW_exp.data(),
 			dCdP.data(), W.data(), epsilon_W.data(), P, Q, YD, Z, alpha, epsilon_inc, epsilon_dec);		
@@ -249,12 +249,6 @@ void MMTSNE::compute_similarity_Q(std::vector<double> &Q, double &Z,
 			for (size_t m = 0; m < y_maps; ++m) {
 				Q[base1_q + rj] += (iW[base1_iw + m] * iW[base2_iw + m]
 					* YD[m*x_rows*x_rows + base1_q + rj]);				
-				//if (!isnan(qt)) {
-				//	Q[base1_q + rj] += qt;
-				//}
-				//else {
-				//	std::cout << "";		// DEBUG CODE
-				//}
 			}			
 			Q[base2_q + ri] = Q[base1_q + rj];			
 			Z += Q[base1_q + rj];
@@ -267,15 +261,6 @@ void MMTSNE::compute_similarity_Q(std::vector<double> &Q, double &Z,
 		for (size_t rj = 0; rj < ri; ++rj) {
 			Q[ri*x_rows + rj] /= Z;
 			Q[rj*x_rows + ri] = Q[ri*x_rows + rj];
-			//double qq = Q[ri*x_rows + rj] / Z;
-			//// DEBUG CODE
-			//if (isnan(qq)) {
-			//	Q[ri*x_rows + rj] = Q[rj*x_rows + ri] = DBL_MIN;
-			//}
-			//else {
-			//	Q[ri*x_rows + rj] /= Z;
-			//	Q[rj*x_rows + ri] = Q[ri*x_rows + rj];
-			//}
 		}
 	}
 
@@ -528,7 +513,6 @@ void MMTSNE::compute_Gaussian_kernel(const double *X_dist, double *P,
 				else {
 					P[r*x_rows + c] = exp(-beta * X_dist[r*x_rows + c]);
 				}
-				//H += beta * (X_dist[r*x_rows + c] * P[r*x_rows + c]);
 			}
 
 			// Compute entropy of current row
